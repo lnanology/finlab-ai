@@ -1381,7 +1381,18 @@ def _ai_write_custom_script(topic: str, num_slides: int, lang: str) -> Optional[
     enforced since the MasterPipeline/Stress-Lab fabricated-number cleanup
     (tasks #226/#230/#272). Returns None on any failure -- caller must
     treat that as "cannot generate this custom video", there is no
-    template fallback for an arbitrary topic the way the daily video has."""
+    template fallback for an arbitrary topic the way the daily video has.
+
+    2026-09-06 fix (AJ hit "AI could not write a script for this request"
+    on an ordinary, well-formed topic): the exact-line-count check below
+    is intentional -- a script with the wrong number of lines can't map
+    1:1 onto num_slides's slides -- but LLM output is stochastic, and the
+    model occasionally adds a stray preamble line or splits one sentence
+    across two, failing an otherwise-fine attempt. Retries once with the
+    identical prompt before giving up, rather than loosening the check
+    itself (which risks silently mismatching lines to the wrong slide)
+    or padding a missing line (which would violate this same function's
+    own anti-fabrication rule)."""
     try:
         from ai.ai_router import get_ai_response
     except Exception:
@@ -1409,26 +1420,31 @@ def _ai_write_custom_script(topic: str, num_slides: int, lang: str) -> Optional[
         f"Output ONLY the {num_slides} lines of narration text, nothing else."
     )
 
-    try:
-        # 2026-09-02 fix (AJ reported: typing a request into the admin chat
-        # box produced narration that just read the typed text back almost
-        # verbatim instead of writing new commentary about it). reasoning_
-        # effort="low" (the original setting) gives Groq's model a small
-        # completion-token floor (700, see _groq()'s docstring) and little
-        # room to do anything but closely mirror short/directive input --
-        # "high" (floor 1400) gives it room to actually reason about the
-        # topic and produce original sentences, at the cost of a slightly
-        # slower call. Paired with the explicit anti-echo instruction above.
-        response = get_ai_response(prompt, max_tokens=500, reasoning_effort="high")
-    except Exception:
-        return None
-    if not response:
-        return None
-
-    lines = [ln.strip(" \t\"'") for ln in response.strip().split("\n") if ln.strip()]
-    if len(lines) != num_slides:
-        return None
-    return lines
+    # 2026-09-02 fix (AJ reported: typing a request into the admin chat box
+    # produced narration that just read the typed text back almost
+    # verbatim instead of writing new commentary about it). reasoning_
+    # effort="low" (the original setting) gives Groq's model a small
+    # completion-token floor (700, see _groq()'s docstring) and little
+    # room to do anything but closely mirror short/directive input --
+    # "high" (floor 1400) gives it room to actually reason about the
+    # topic and produce original sentences, at the cost of a slightly
+    # slower call. Paired with the explicit anti-echo instruction above.
+    #
+    # 2026-09-06: up to 2 attempts total (see this function's docstring
+    # for why a retry, not a looser check) -- identical prompt each time,
+    # nothing adaptive, so a pass on attempt 2 is exactly as trustworthy
+    # as a pass on attempt 1.
+    for _attempt in range(2):
+        try:
+            response = get_ai_response(prompt, max_tokens=500, reasoning_effort="high")
+        except Exception:
+            continue
+        if not response:
+            continue
+        lines = [ln.strip(" \t\"'") for ln in response.strip().split("\n") if ln.strip()]
+        if len(lines) == num_slides:
+            return lines
+    return None
 
 
 def parse_video_chat_request(message: str) -> dict:
