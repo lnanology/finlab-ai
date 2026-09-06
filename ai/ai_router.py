@@ -367,6 +367,46 @@ def _deepseek(prompt: str, max_tokens: int, _retry: int = 1) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
+def generate_background_image(prompt: str, size: str = "1024x1024", _retry: int = 1):
+    """2026-09-06 addition (services/video_engine_service.py's Custom
+    Video feature -- AJ asked for a relevant AI-generated background
+    image instead of a plain theme color). Same DEEPINFRA_API_KEY already
+    used by _deepseek()/_kimi() above -- DeepInfra's OpenAI-compatible
+    images endpoint defaults to FLUX.1 [schnell], priced at roughly
+    $0.0005 per 1024x1024 image at its default step count, so this adds
+    a fraction of a cent per video, not a meaningful new cost line.
+
+    Returns raw image bytes (decoded from the API's base64 response) on
+    success, or None on ANY failure (missing key, network error, bad/
+    missing response data) -- caller must treat a background image as a
+    nice-to-have, same "real chart is a bonus, never a requirement"
+    convention video_engine_service.py already applies to its candlestick
+    chart slides. Never raises.
+    """
+    import base64
+    import time
+    import requests
+
+    key = os.getenv("DEEPINFRA_API_KEY")
+    if not key:
+        return None
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = {"prompt": prompt, "size": size, "n": 1, "response_format": "b64_json"}
+    try:
+        res = requests.post("https://api.deepinfra.com/v1/openai/images/generations",
+                            json=payload, headers=headers, timeout=30)
+        if res.status_code in (429, 503) and _retry > 0:
+            time.sleep(3)
+            return generate_background_image(prompt, size=size, _retry=_retry - 1)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        b64_json = data["data"][0]["b64_json"]
+        return base64.b64decode(b64_json)
+    except Exception:
+        return None
+
+
 def _openrouter(prompt: str, max_tokens: int, _retry: int = 1) -> str:
     """
     2026-07-26 addition: OpenRouter (https://openrouter.ai) -- a single
