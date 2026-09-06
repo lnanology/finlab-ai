@@ -18,10 +18,14 @@
 <style>
 .tut-section{margin-top:2.4rem;padding-top:2rem;border-top:1px solid var(--border)}
 .tut-section:first-of-type{border-top:none;margin-top:1.2rem;padding-top:0}
-.tut-shots{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}
-.tut-shot{flex:0 0 auto;text-align:center}
-.tut-shot img{max-width:260px;width:100%;border:1px solid var(--border);border-radius:10px;display:block}
-.tut-shot span{display:block;color:var(--text3);font-size:0.78rem;margin-top:0.35rem}
+.tut-shot-frame{margin:1rem 0;text-align:center}
+.tut-shot-frame img{border:1px solid var(--border);border-radius:10px;display:block;margin:0 auto;width:100%;height:auto}
+.tut-shot-desktop{max-width:680px}
+.tut-shot-mobile{max-width:300px;display:none}
+@media(max-width:700px){
+  .tut-shot-desktop{display:none}
+  .tut-shot-mobile{display:block}
+}
 .tut-steps{margin:0.8rem 0 0.6rem 1.2rem;padding:0;color:var(--text2)}
 .tut-steps li{margin-bottom:0.35rem}
 .tut-note{background:var(--navy2);border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin-top:0.9rem;font-size:0.88rem;color:var(--text2)}
@@ -75,9 +79,9 @@
   <div class="tut-section" id="chart-analysis">
     <h2>1. AI Chart Analysis</h2>
     <p class="page-sub" style="margin-top:0.3rem">Type any global ticker and get real technical analysis — trend, support/resistance, and a confidence-scored signal computed from real price history, not an AI guess.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-chart-analysis.png" alt="AI Chart Analysis desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-chart-analysis.png" alt="AI Chart Analysis mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-chart-analysis.png" alt="AI Chart Analysis desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-chart-analysis.png" alt="AI Chart Analysis mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Chart Analysis</strong> in the top nav, or xfinlab.com/chart-analysis.html</li>
@@ -92,9 +96,9 @@
   <div class="tut-section" id="stress-lab">
     <h2>2. Black Swan Stress Test Lab</h2>
     <p class="page-sub" style="margin-top:0.3rem">See how a strategy or ticker would have survived real historical crises (2008, 2020 COVID crash) using an actual Monte Carlo simulation over real historical returns.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-stress-lab.png" alt="Stress Lab desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-stress-lab.png" alt="Stress Lab mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-stress-lab.png" alt="Stress Lab desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-stress-lab.png" alt="Stress Lab mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Stress Lab</strong></li>
@@ -109,9 +113,9 @@
   <div class="tut-section" id="screener">
     <h2>3. Stock Screener</h2>
     <p class="page-sub" style="margin-top:0.3rem">Pick a preset or set your own criteria and get an AI-written screening report explaining which stocks fit and why.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-screener.png" alt="Screener desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-screener.png" alt="Screener mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-screener.png" alt="Screener desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-screener.png" alt="Screener mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Screener</strong></li>
@@ -125,9 +129,9 @@
   <div class="tut-section" id="compare">
     <h2>4. Multi-Company Benchmark Analysis</h2>
     <p class="page-sub" style="margin-top:0.3rem">Compare real-time market data for up to 5 companies at once, with AI-generated commentary on strengths, weaknesses, risks and investment angles.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-compare.png" alt="Compare desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-compare.png" alt="Compare mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-compare.png" alt="Compare desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-compare.png" alt="Compare mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Compare</strong></li>
@@ -140,9 +144,9 @@
   <div class="tut-section" id="anomaly">
     <h2>5. Anomaly Detection Radar</h2>
     <p class="page-sub" style="margin-top:0.3rem">Scans your watchlist (or a default basket if not logged in) using real volume and price data to surface unusual moves — every metric comes from real market data, not AI guesswork.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-anomaly-detection.png" alt="Anomaly Detection desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-anomaly-detection.png" alt="Anomaly Detection mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-anomaly-detection.png" alt="Anomaly Detection desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-anomaly-detection.png" alt="Anomaly Detection mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Anomaly Detection</strong></li>
@@ -155,9 +159,9 @@
   <div class="tut-section" id="portfolio">
     <h2>6. Portfolio Allocation Analysis</h2>
     <p class="page-sub" style="margin-top:0.3rem">Uses each of your watchlist stocks' real market scores (or a default basket if not logged in) to suggest allocation weights, so you can see how diversified your portfolio really is.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-portfolio.png" alt="Portfolio desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-portfolio.png" alt="Portfolio mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-portfolio.png" alt="Portfolio desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-portfolio.png" alt="Portfolio mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Portfolio</strong></li>
@@ -171,9 +175,9 @@
   <div class="tut-section" id="news-denoise">
     <h2>7. News Denoise Analysis</h2>
     <p class="page-sub" style="margin-top:0.3rem">Enter a stock ticker or market topic and AI organizes the latest news highlights, filtering out sensationalized hype language, into a concise summary.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-news-denoise.png" alt="News Denoise desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-news-denoise.png" alt="News Denoise mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-news-denoise.png" alt="News Denoise desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-news-denoise.png" alt="News Denoise mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>News Denoise</strong></li>
@@ -187,9 +191,9 @@
   <div class="tut-section" id="probability-scan">
     <h2>8. Probability Scan</h2>
     <p class="page-sub" style="margin-top:0.3rem">Combines real market data, technical indicators, and news sentiment into a bullish/bearish probability read — not trading advice.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-probability-scan.png" alt="Probability Scan desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-probability-scan.png" alt="Probability Scan mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-probability-scan.png" alt="Probability Scan desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-probability-scan.png" alt="Probability Scan mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Probability Scan</strong></li>
@@ -203,9 +207,9 @@
   <div class="tut-section" id="pairs-scan">
     <h2>9. Pairs Statistical Arbitrage Scanner</h2>
     <p class="page-sub" style="margin-top:0.3rem">Monitors the real historical price relationship between two tickers and flags when today's spread has moved unusually far from its own historical norm.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-pairs-scan.png" alt="Pairs Scan desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-pairs-scan.png" alt="Pairs Scan mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-pairs-scan.png" alt="Pairs Scan desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-pairs-scan.png" alt="Pairs Scan mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>Pairs Trading</strong></li>
@@ -220,9 +224,9 @@
   <div class="tut-section" id="ai-analysis">
     <h2>10. AI Quick Market Analysis</h2>
     <p class="page-sub" style="margin-top:0.3rem">The fastest single entry point: enter a stock/ETF/crypto symbol and get multi-dimensional scores and a probability reference from real market data and news, in one place.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-ai-analysis-dashboard.png" alt="AI Analysis desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-ai-analysis-dashboard.png" alt="AI Analysis mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-ai-analysis-dashboard.png" alt="AI Analysis desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-ai-analysis-dashboard.png" alt="AI Analysis mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>AI Analysis</strong></li>
@@ -236,9 +240,9 @@
   <div class="tut-section" id="ai-chat">
     <h2>11. AI Chat</h2>
     <p class="page-sub" style="margin-top:0.3rem">Institutional-grade AI financial analysis in a conversational form — enter a ticker, company name, or upload a chart image, and get an in-depth report instantly.</p>
-    <div class="tut-shots">
-      <div class="tut-shot"><img src="tutorial-screenshots/desktop-ai-chat.png" alt="AI Chat desktop"><span>Desktop</span></div>
-      <div class="tut-shot"><img src="tutorial-screenshots/mobile-chat-homepage.png" alt="AI Chat mobile"><span>Mobile</span></div>
+    <div class="tut-shot-frame">
+      <img class="tut-shot-desktop" src="tutorial-screenshots/desktop-ai-chat.png" alt="AI Chat desktop">
+      <img class="tut-shot-mobile" src="tutorial-screenshots/mobile-chat-homepage.png" alt="AI Chat mobile">
     </div>
     <ol class="tut-steps">
       <li>Go to <strong>AI Chat</strong></li>
