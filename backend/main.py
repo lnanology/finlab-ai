@@ -187,6 +187,45 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# 2026-09-07 (security review fix): admin.html used to send its admin JWT
+# as a `?token=...` URL query parameter on every one of api/admin.py's
+# ~58 endpoints -- that leaks the token into Railway's access logs, the
+# admin's own browser history, and any Referer header a request happens
+# to carry. The honest fix is to send it as an `Authorization: Bearer`
+# header instead (admin.html was updated in the same change to do
+# exactly that, and no longer puts the token in any admin URL).
+#
+# Every route in api/admin.py still individually declares `token: str`
+# as its own parameter, though -- rewriting all ~58 of those signatures
+# (several with other positional/default params interleaved, which
+# would also force reordering every one to keep valid Python syntax) was
+# judged too much blast-radius for a single pass on a live admin panel.
+# Instead, this middleware bridges the gap for every request BEFORE
+# FastAPI/Starlette's routing resolves query params: if an
+# `Authorization: Bearer <token>` header is present and the URL doesn't
+# already carry its own `token` query param, it rewrites the request's
+# query string to include one, so every existing route's `verify_admin
+# (token, ...)` call keeps working completely unchanged. In practice,
+# once admin.html only ever sends the header, no admin request leaks a
+# token into a URL anymore -- the query-param path stays live purely as
+# a backward-compatible fallback (e.g. a saved/bookmarked admin URL, or
+# any external script still using the old style), not as the primary
+# path.
+@app.middleware("http")
+async def bridge_admin_token_header_to_query(request: Request, call_next):
+    if request.url.path.startswith("/api/admin/"):
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer ") and "token=" not in (request.scope.get("query_string") or b"").decode("latin-1"):
+            token = auth[7:].strip()
+            if token:
+                from urllib.parse import parse_qsl, urlencode
+
+                existing = dict(parse_qsl(request.scope.get("query_string", b"").decode("latin-1")))
+                existing["token"] = token
+                request.scope["query_string"] = urlencode(existing).encode("latin-1")
+    return await call_next(request)
+
+
 # EU AI Act Article 50(2) good-faith machine-readable marking (see
 # services/ai_provenance.py for the full rationale + deadline context).
 # Applies only to the explicit allow-list of AI-content-generating routes so
