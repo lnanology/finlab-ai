@@ -25,7 +25,7 @@ curl "https://api.xfinlab.com/api/chart-search/AAPL?period=6mo&interval=1d"
 
 **Official API (X-API-Key, recommended for real use):**
 ```bash
-curl "https://api.xfinlab.com/intelligence/v1/technical/AAPL" \
+curl "https://api.xfinlab.com/api/intelligence/v1/technical/AAPL" \
   -H "X-API-Key: YOUR_KEY"
 ```
 
@@ -33,7 +33,7 @@ curl "https://api.xfinlab.com/intelligence/v1/technical/AAPL" \
 import requests
 
 r = requests.get(
-    "https://api.xfinlab.com/intelligence/v1/technical/AAPL",
+    "https://api.xfinlab.com/api/intelligence/v1/technical/AAPL",
     headers={"X-API-Key": "YOUR_KEY"},
 )
 data = r.json()["data"]
@@ -63,7 +63,7 @@ curl -X POST "https://api.xfinlab.com/api/stress-lab" \
 import requests
 
 r = requests.post(
-    "https://api.xfinlab.com/intelligence/v1/stress-test",
+    "https://api.xfinlab.com/api/intelligence/v1/stress-test",
     headers={"X-API-Key": "YOUR_KEY"},
     json={"symbol": "AAPL", "amount": 100000, "horizon_days": 252},
 )
@@ -103,7 +103,7 @@ curl "https://api.xfinlab.com/api/free-tools-demo/opportunity-radar"
 
 **Official API:**
 ```bash
-curl "https://api.xfinlab.com/intelligence/v1/opportunity-radar" \
+curl "https://api.xfinlab.com/api/intelligence/v1/opportunity-radar" \
   -H "X-API-Key: YOUR_KEY"
 ```
 

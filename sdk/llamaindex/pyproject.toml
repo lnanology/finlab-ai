@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xfinlab-llamaindex"
+version = "0.1.0"
+description = "LlamaIndex tool spec for the XFINLAB Intelligence API"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "XFINLAB" }]
+# xfinlab-intelligence isn't on PyPI yet either (see sdk/python/README.md)
+# -- installing this package via the git+subdirectory URL below resolves
+# it via this direct reference. If you're vendoring instead of installing
+# from git, you'll need xfinlab_intelligence/__init__.py alongside this
+# package's own files.
+dependencies = [
+    "llama-index-core>=0.10",
+    "xfinlab-intelligence @ git+https://github.com/lnanology/Xfinlab.git#subdirectory=sdk/python",
+]
+keywords = ["xfinlab", "llamaindex", "llama-index", "tool-spec", "finance", "agent", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial",
+]
+
+[project.urls]
+Homepage = "https://www.xfinlab.com/intelligence-api.html"
+Repository = "https://github.com/lnanology/Xfinlab"
+
+[tool.setuptools]
+packages = ["xfinlab_llamaindex"]
