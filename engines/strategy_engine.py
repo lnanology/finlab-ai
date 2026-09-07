@@ -1,4 +1,113 @@
+import ast
 import json
+import logging
+import operator
+
+logger = logging.getLogger(__name__)
+
+
+class ConditionEvaluationError(Exception):
+    """Raised when a strategy rule's condition string can't be safely
+    parsed/evaluated -- e.g. a typo in a strategies/*.json file, or
+    (should this module's trust model ever change) a condition string
+    containing disallowed syntax. StrategyEngine._evaluate_condition
+    catches this and treats it as "condition not met" (contributes 0 to
+    the score), not a crash of the whole score calculation."""
+
+
+_ALLOWED_COMPARE_OPS = {
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+}
+
+
+class _SafeConditionEvaluator(ast.NodeVisitor):
+    """Restricted evaluator for strategy-rule condition strings like
+    "data['volume_ratio'] > 2" or "data['price'] > 100 and data['rsi'] < 70".
+
+    2026-09-07 (security review): replaces a bare eval(condition,
+    {"data": data}) call. These condition strings have always come from
+    this repo's own bundled strategies/*.json files -- no endpoint
+    writes to strategies/*.json, so the old eval() was never directly
+    reachable with attacker-controlled input. Still, eval() on any
+    string is a foot-gun that's cheap to remove: this walks a real
+    ast.parse() tree and only permits the handful of node types an
+    "and"/"or"-joined chain of dict-lookup comparisons actually needs
+    (Compare, BoolOp, UnaryOp for "not", Subscript on the single `data`
+    name, Name, Constant) -- anything else (function calls, attribute
+    access, imports, comprehensions, walrus assignment, ...) raises
+    ConditionEvaluationError instead of silently running."""
+
+    def __init__(self, data: dict):
+        self.data = data
+
+    def visit(self, node):
+        method = "visit_" + node.__class__.__name__
+        visitor = getattr(self, method, None)
+        if visitor is None:
+            raise ConditionEvaluationError(f"Disallowed syntax in condition: {node.__class__.__name__}")
+        return visitor(node)
+
+    def visit_Expression(self, node):
+        return self.visit(node.body)
+
+    def visit_BoolOp(self, node):
+        values = [self.visit(v) for v in node.values]
+        if isinstance(node.op, ast.And):
+            return all(values)
+        if isinstance(node.op, ast.Or):
+            return any(values)
+        raise ConditionEvaluationError("Disallowed boolean operator")
+
+    def visit_UnaryOp(self, node):
+        if isinstance(node.op, ast.Not):
+            return not self.visit(node.operand)
+        raise ConditionEvaluationError("Disallowed unary operator")
+
+    def visit_Compare(self, node):
+        left = self.visit(node.left)
+        for op, comparator in zip(node.ops, node.comparators):
+            op_fn = _ALLOWED_COMPARE_OPS.get(type(op))
+            if op_fn is None:
+                raise ConditionEvaluationError(f"Disallowed comparison operator: {type(op).__name__}")
+            right = self.visit(comparator)
+            if not op_fn(left, right):
+                return False
+            left = right
+        return True
+
+    def visit_Subscript(self, node):
+        value = self.visit(node.value)
+        key_node = node.slice
+        key = self.visit(key_node) if isinstance(key_node, ast.AST) else key_node
+        try:
+            return value[key]
+        except (KeyError, TypeError, IndexError) as e:
+            raise ConditionEvaluationError(f"Bad subscript lookup: {e}")
+
+    def visit_Name(self, node):
+        if node.id == "data":
+            return self.data
+        raise ConditionEvaluationError(f"Disallowed name: {node.id!r} (only 'data' is permitted)")
+
+    def visit_Constant(self, node):
+        return node.value
+
+
+def safe_eval_condition(condition: str, data: dict) -> bool:
+    """Parse and evaluate a strategy-rule condition string using only the
+    restricted grammar _SafeConditionEvaluator permits. Raises
+    ConditionEvaluationError on any disallowed syntax or lookup failure
+    -- see that class's docstring for the full rationale."""
+    try:
+        tree = ast.parse(condition, mode="eval")
+    except SyntaxError as e:
+        raise ConditionEvaluationError(f"Invalid condition syntax: {e}")
+    return bool(_SafeConditionEvaluator(data).visit(tree))
 
 
 class StrategyEngine:
@@ -72,7 +181,15 @@ class StrategyEngine:
         返回：
         bool: 條件是否成立。
         """
-        return eval(condition, {"data": data})  # 使用 eval 執行條件表達式
+        try:
+            return safe_eval_condition(condition, data)
+        except ConditionEvaluationError as e:
+            # Treated as "condition not met" (contributes 0 to the score)
+            # rather than crashing the whole calculate_score() call --
+            # see safe_eval_condition()'s docstring above for why this
+            # replaced a bare eval() call.
+            logger.warning("StrategyEngine: skipping unevaluable condition %r: %s", condition, e)
+            return False
 
 
 # 示例用法
