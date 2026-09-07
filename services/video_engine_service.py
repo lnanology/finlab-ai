@@ -1022,6 +1022,41 @@ def _compute_indicator_series(ticker: str, indicator: str, limit: int = 20) -> O
         return None
 
 
+def _detect_chart_placement(topic: str) -> dict:
+    """2026-09-07 addition for upgrade #4 (AJ: "1-4可以全做" -- explicit
+    slide count/chart placement control). Slide COUNT is already
+    explicitly controllable today via admin.html's videoChatSlides
+    dropdown -> the num_slides parameter generate_custom_video() already
+    takes -- this only adds control over WHERE chart slide(s) land among
+    the body slots, since that was previously always hardcoded to the
+    front (body_kinds = ["chart"]*n + ["custom"]*...).
+
+    Returns {"mode": "start"|"end"|"middle"|"index", "index": Optional[int]}.
+    "index" carries a 1-based OVERALL slide number as the admin would
+    describe it out loud (counting the intro slide as #1) -- the caller
+    converts that to a 0-based body-slot offset. Defaults to "start"
+    (the pre-existing, unchanged behavior) when nothing explicit is
+    said, so a topic that doesn't mention placement at all behaves
+    exactly as it did before this feature existed."""
+    topic = topic or ""
+    lower = topic.lower()
+
+    index_match = re.search(r"slide\s*#?\s*(\d+)", lower) or re.search(r"第\s*(\d+)\s*張", topic)
+    chart_word_present = any(kw in lower for kw in ("chart", "graph")) or any(kw in topic for kw in ("圖表", "圖"))
+    if index_match and chart_word_present:
+        return {"mode": "index", "index": int(index_match.group(1))}
+
+    end_kw = ("chart at the end", "chart last", "chart at the back", "圖表放最後", "圖表放喺尾", "圖表放尾", "圖表最後")
+    if any(kw in lower or kw in topic for kw in end_kw):
+        return {"mode": "end", "index": None}
+
+    middle_kw = ("chart in the middle", "chart in the center", "圖表放中間", "圖表放喺中間", "圖表中間")
+    if any(kw in lower or kw in topic for kw in middle_kw):
+        return {"mode": "middle", "index": None}
+
+    return {"mode": "start", "index": None}
+
+
 def _draw_indicator_panel(draw: ImageDraw.ImageDraw, indicator: dict, x0: int, y0: int, w: int, h: int,
                            colors: dict, lang: Optional[str] = None):
     """Draws a real RSI or MACD panel below the candlestick chart, fed
@@ -1943,7 +1978,32 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
 
     n_charts = min(len(chart_slides_data), n_body)
     chart_ticker = chart_slides_data[0][0] if chart_slides_data else None  # back-compat: first chart's ticker
-    body_kinds = ["chart"] * n_charts + ["custom"] * (n_body - n_charts)
+
+    # 2026-09-07 (upgrade #4, chart placement control): chart slide(s)
+    # used to always land at the FRONT of the body slots regardless of
+    # what the admin asked for. Now an explicit instruction in the topic
+    # (e.g. "put the chart at the end", "圖表放中間", "chart on slide 3")
+    # controls where they go; anything else (including no instruction at
+    # all) keeps the original front-loaded placement unchanged.
+    body_kinds = ["custom"] * n_body
+    if n_charts:
+        placement = _detect_chart_placement(parsed["topic"])
+        if placement["mode"] == "end":
+            first_chart_pos = n_body - n_charts
+        elif placement["mode"] == "middle":
+            first_chart_pos = max(0, (n_body - n_charts) // 2)
+        elif placement["mode"] == "index" and placement["index"] is not None:
+            # index is a 1-based overall slide number counting the intro
+            # as #1, so overall slide N is body slot N-2 (0-based) -- e.g.
+            # "put the chart on slide 3" with a 6-slide video means body
+            # slot 1 (the 2nd body slide). Clamped to fit ALL chart slides
+            # on-screen rather than letting a wild number push some off
+            # the end or wrap around unpredictably.
+            first_chart_pos = max(0, min(n_body - n_charts, placement["index"] - 2))
+        else:
+            first_chart_pos = 0
+        for i in range(first_chart_pos, first_chart_pos + n_charts):
+            body_kinds[i] = "chart"
 
     # 2026-09-06 (AJ asked "GEN出來可以有相關圖片做背景嗎" -- can the
     # generated video have a relevant background image): ONE AI-generated
@@ -1956,10 +2016,19 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
     bg_image = _generate_video_background(parsed["topic"], width, height)
     bg_payload = {"_bg_image": bg_image} if bg_image is not None else None
 
-    body_payloads = [
-        {"ticker": t, "_candles": candles, "_sr": sr, "_indicator": indicator}
-        for (t, candles, sr, indicator) in chart_slides_data[:n_charts]
-    ] + [bg_payload] * (n_body - n_charts)
+    # body_kinds may now place "chart" slots anywhere (not just the
+    # front) per the placement logic above, so build payloads by walking
+    # body_kinds in order and pulling the next chart's data whenever a
+    # "chart" slot is hit, rather than assuming charts are a fixed
+    # leading prefix.
+    chart_data_iter = iter(chart_slides_data[:n_charts])
+    body_payloads = []
+    for k in body_kinds:
+        if k == "chart":
+            t, candles, sr, indicator = next(chart_data_iter)
+            body_payloads.append({"ticker": t, "_candles": candles, "_sr": sr, "_indicator": indicator})
+        else:
+            body_payloads.append(bg_payload)
     slides = [("intro", bg_payload)] + list(zip(body_kinds, body_payloads)) + [("outro", bg_payload)]
 
     result = _render_video_pipeline(
