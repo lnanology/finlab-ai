@@ -1046,6 +1046,37 @@ const API = 'https://api.xfinlab.com/api';
 let adminToken = localStorage.getItem('xfinlab_admin_token');
 let currentPage = 1;
 
+// 2026-09-07 (security review fix): every admin API call below still
+// builds its URL as `${API}/admin/...?token=${adminToken}` (~46 call
+// sites) -- putting the admin JWT in the URL leaks it into the
+// browser's own history and any Referer header a request happens to
+// carry. Rather than hand-editing all ~46 call sites individually
+// (fragile, easy to miss one and leave a real leak), this wraps the
+// global fetch() ONCE: any outgoing request whose URL still contains
+// `token=${adminToken}` gets that parameter stripped from the URL and
+// moved to a real `Authorization: Bearer` header instead, before the
+// request ever leaves the browser. No call site below needed to
+// change. The backend has a matching middleware
+// (backend/main.py's bridge_admin_token_header_to_query) that re-adds
+// it server-side before routing, so every existing admin.py endpoint
+// -- which still individually expects a `token` value -- keeps working
+// completely unchanged. Net effect: the wire format changes (header
+// instead of URL param), nothing else does.
+(function() {
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    const isAdminUrl = typeof input === 'string' && adminToken && input.includes(`token=${adminToken}`);
+    if (!isAdminUrl) return nativeFetch(input, init);
+    const strippedUrl = input
+      .replace(`?token=${adminToken}&`, '?')
+      .replace(`&token=${adminToken}`, '')
+      .replace(`?token=${adminToken}`, '');
+    const nextInit = Object.assign({}, init);
+    nextInit.headers = Object.assign({}, init && init.headers, {'Authorization': `Bearer ${adminToken}`});
+    return nativeFetch(strippedUrl, nextInit);
+  };
+})();
+
 // --- AJ's request (2026-09-03): "加個香港中文得啦" -- a Hong Kong Chinese
 // toggle for the admin UI chrome. This is an internal, single-operator
 // tool (only AJ uses it), not the public 47-language site, so this is
