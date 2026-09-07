@@ -252,23 +252,90 @@ def _init_bonus_table():
 _init_bonus_table()
 
 
-def get_quota_bonus(api_key: str) -> int:
+def _is_hash_shaped(value: str) -> bool:
+    """A SHA-256 hex digest is always exactly 64 lowercase hex chars. A
+    raw XFINLAB API key ("xfl_" + secrets.token_urlsafe(32)) is a
+    different length and uses base64url's mixed-case/-/_ alphabet, so
+    this is a cheap, reliable discriminator between "already migrated"
+    and "still the raw key" without a DB round-trip. Used by
+    _migrate_bonus_table_to_hashed_keys() below."""
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _migrate_bonus_table_to_hashed_keys():
+    """2026-09-07 (security review: "API keys stored in plaintext at
+    rest"): api_key_quota_bonus used to be keyed by the raw API key
+    string -- same plaintext-at-rest concern as api_keys/
+    self_serve_api_keys (see services/api_key_service.py's verify_key()
+    docstring for that migration's full story). This table needed its
+    OWN one-time migration since, unlike the credential tables, nothing
+    naturally re-touches a bonus row on a key's next use -- a referral
+    bonus is written once (at referral time) and only ever read after
+    that, never rewritten.
+
+    Every caller of add_quota_bonus()/get_quota_bonus() was updated in
+    this same change to always pass a key_hash from now on (either via
+    api_key_service.get_active_key_for_user(), which now returns a
+    hash, or by hashing a raw request-time key inline -- see check()
+    below) -- so this migration only ever needs to run once per legacy
+    row; nothing writes a raw key into this table again after today.
+    One-time, idempotent (re-running is a safe no-op once every row is
+    hash-shaped), and best-effort: any failure here just means that
+    row's bonus is temporarily unreachable until it's investigated, not
+    a crash of quota checking generally, since get_quota_bonus() simply
+    returns 0 for an unmatched row either way."""
+    try:
+        conn = _get_db()
+        rows = conn.execute("SELECT api_key, bonus FROM api_key_quota_bonus").fetchall()
+        for row in rows:
+            raw_or_hash = row["api_key"]
+            if _is_hash_shaped(raw_or_hash):
+                continue
+            import hashlib
+
+            hashed = hashlib.sha256(raw_or_hash.encode("utf-8")).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO api_key_quota_bonus (api_key, bonus) VALUES (?, ?)
+                ON CONFLICT(api_key) DO UPDATE SET bonus = MIN(?, bonus + excluded.bonus)
+                """,
+                (hashed, row["bonus"], MAX_QUOTA_BONUS),
+            )
+            conn.execute("DELETE FROM api_key_quota_bonus WHERE api_key=?", (raw_or_hash,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+_migrate_bonus_table_to_hashed_keys()
+
+
+def get_quota_bonus(api_key_hash: str) -> int:
+    """2026-09-07: renamed param to make the post-migration contract
+    explicit -- this must be called with a key_hash (see
+    api_key_service.get_active_key_for_user()/_hash_key()), never a raw
+    API key, or it will silently and always return 0 (a lookup miss,
+    not an error) since api_key_quota_bonus is now hash-keyed."""
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT bonus FROM api_key_quota_bonus WHERE api_key=?", (api_key,)
+            "SELECT bonus FROM api_key_quota_bonus WHERE api_key=?", (api_key_hash,)
         ).fetchone()
         return row["bonus"] if row else 0
     finally:
         conn.close()
 
 
-def add_quota_bonus(api_key: str, amount: int):
+def add_quota_bonus(api_key_hash: str, amount: int):
     """Best-effort additive grant, capped at MAX_QUOTA_BONUS regardless of
     how many times this is called for the same key. Never raises -- called
     from referral_service.py's use_code(), which must never fail a
-    registration/referral over a quota-bonus hiccup."""
-    if not api_key or amount <= 0:
+    registration/referral over a quota-bonus hiccup.
+
+    2026-09-07: renamed param -- same key_hash-only contract as
+    get_quota_bonus() above."""
+    if not api_key_hash or amount <= 0:
         return
     try:
         conn = _get_db()
@@ -277,7 +344,7 @@ def add_quota_bonus(api_key: str, amount: int):
             INSERT INTO api_key_quota_bonus (api_key, bonus) VALUES (?, ?)
             ON CONFLICT(api_key) DO UPDATE SET bonus = MIN(?, bonus + excluded.bonus)
             """,
-            (api_key, min(amount, MAX_QUOTA_BONUS), MAX_QUOTA_BONUS),
+            (api_key_hash, min(amount, MAX_QUOTA_BONUS), MAX_QUOTA_BONUS),
         )
         conn.commit()
         conn.close()
@@ -294,12 +361,26 @@ def check(api_key: str, tier: str) -> dict:
     2026-08-25: `limit` now includes any referral-earned bonus (see
     add_quota_bonus() above) on top of the flat TIER_LIMITS number --
     unlimited tiers (limit==-1) are returned untouched, a bonus is
-    meaningless there."""
+    meaningless there.
+
+    2026-09-07 (security review: hash keys at rest): `api_key` here is
+    still the RAW key straight off the incoming request's X-API-Key
+    header (that's the one place in this whole flow it can only ever be
+    raw -- it's literally what the caller presented), used as-is for
+    the usage-counter lookup below (intelligence_api_usage is an
+    ephemeral per-day counter table, not a persistent credential store,
+    so it wasn't in scope for the hashing migration). The bonus lookup
+    specifically now hashes it first, since api_key_quota_bonus WAS
+    migrated to be hash-keyed (see _migrate_bonus_table_to_hashed_keys()
+    above) -- passing the raw key to get_quota_bonus() here would
+    silently and always return 0."""
     base_limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     if base_limit == -1:
         return {"allowed": True, "used": 0, "limit": -1, "remaining": -1, "tier": tier, "bonus": 0}
 
-    bonus = get_quota_bonus(api_key)
+    import hashlib
+
+    bonus = get_quota_bonus(hashlib.sha256(api_key.encode("utf-8")).hexdigest())
     limit = base_limit + bonus
 
     today = datetime.now().strftime("%Y-%m-%d")
