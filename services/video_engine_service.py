@@ -807,10 +807,26 @@ def _render_slide(kind: str, signal: Optional[dict], lang: str, caption_text: st
         y += int(height * 0.09)
 
         candles = (signal or {}).get("_candles") or []
+        indicator = (signal or {}).get("_indicator")
         candle_bottom = height - int(height * 0.2)
-        if candles and candle_bottom > y:
-            _draw_candles(draw, candles, x0=pad_x, y0=y, w=width - 2 * pad_x, h=candle_bottom - y,
+        # 2026-09-07 (upgrade #3, RSI/MACD indicator charts): when a
+        # ticker's chart also has indicator data, shrink the candlestick
+        # area to make room for the indicator panel underneath instead of
+        # overlapping it -- the candles stay the primary visual, the
+        # indicator is a secondary strip below, same visual hierarchy a
+        # real charting terminal uses.
+        if indicator:
+            panel_h = int(height * 0.155)
+            panel_y0 = candle_bottom - panel_h
+            candle_area_bottom = panel_y0 - int(height * 0.018)
+        else:
+            candle_area_bottom = candle_bottom
+        if candles and candle_area_bottom > y:
+            _draw_candles(draw, candles, x0=pad_x, y0=y, w=width - 2 * pad_x, h=candle_area_bottom - y,
                           colors=colors, lang=lang, sr=(signal or {}).get("_sr"))
+        if indicator:
+            _draw_indicator_panel(draw, indicator, x0=pad_x, y0=panel_y0, w=width - 2 * pad_x, h=panel_h,
+                                   colors=colors, lang=lang)
 
         # 2026-08-13: the spoken-line caption used to be burned into this
         # PNG as static wrapped text right here. It's now a real scrolling
@@ -929,6 +945,154 @@ def _draw_candles(draw: ImageDraw.ImageDraw, candles: List[dict], x0: int, y0: i
             label_font = _get_font(max(10, int(h * 0.045)), lang)
             label_w = _text_width(draw, label, label_font, h * 0.03)
             draw.text((x0 + w - label_w, ly - int(h * 0.05)), label, font=label_font, fill=color)
+
+
+_INDICATOR_KEYWORDS = {
+    "macd": ["macd", "moving average convergence", "平滑異同移動平均線", "麥克指標"],
+    "rsi": ["rsi", "relative strength index", "relative strength", "相對強弱指數", "相對強弱指標", "相對強弱"],
+}
+
+
+def _detect_requested_indicator(topic: str) -> Optional[str]:
+    """2026-09-07 addition for upgrade #3 (AJ: "1-4可以全做" -- technical
+    indicator charts). Checked before any chart is fetched in
+    generate_custom_video(): if the admin's topic explicitly names RSI
+    or MACD (e.g. "explain NVDA's RSI", "講吓大市MACD走勢"), every chart
+    slide in this video gets that indicator panel added below its
+    candlesticks, using the SAME real math (TechnicalAnalysisService.
+    _rsi()/_macd(), the exact methods chart-analysis.html's own
+    indicator values come from) -- never an AI-narrated guess about
+    what the indicator "probably" shows. Checks MACD first since "macd"
+    never collides with an RSI keyword, whereas being liberal about
+    matching order doesn't matter here (the two keyword lists don't
+    overlap). Returns None (never raises) when neither is mentioned --
+    the existing plain-candlestick chart is not a fallback state, it's
+    simply what most requests still want, so this only ever ADDS a
+    panel, never removes the chart itself."""
+    lower = (topic or "").lower()
+    for indicator, keywords in _INDICATOR_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return indicator
+    return None
+
+
+def _compute_indicator_series(ticker: str, indicator: str, limit: int = 20) -> Optional[dict]:
+    """Real RSI/MACD series for the last `limit` bars, aligned to the
+    same window _fetch_candles() renders as candlesticks. Fetches its
+    own longer OHLC history (6mo, vs. _fetch_candles' 2mo) because
+    MACD's 26-period slow EMA needs real warmup data before its early
+    values are meaningful -- computing it over only the visible 20 bars
+    would silently understate the indicator, which this codebase's
+    anti-fabrication rule can't allow even as a rendering shortcut.
+    Reuses TechnicalAnalysisService._rsi()/_macd() directly (the same
+    static methods get_technical_analysis() calls internally) rather
+    than reimplementing the math, so this can never drift from the
+    values chart-analysis.html shows for the same ticker.
+
+    Returns None on ANY failure (fetch error, insufficient history,
+    unrecognized indicator) -- caller must treat an indicator panel as
+    a bonus, same "real chart is a bonus, never a requirement"
+    convention as _fetch_support_resistance() above. Never raises."""
+    try:
+        from services.technical_analysis_service import fetch_ohlc_history, TechnicalAnalysisService
+
+        hist = fetch_ohlc_history(ticker, period="6mo")
+        if hist is None or hist.empty:
+            return None
+        closes = hist["Close"].dropna()
+        if len(closes) < 30:
+            return None
+
+        if indicator == "rsi":
+            rsi = TechnicalAnalysisService._rsi(closes)
+            values = [round(float(v), 2) for v in rsi.tail(limit)]
+            if not values:
+                return None
+            return {"kind": "rsi", "values": values}
+        elif indicator == "macd":
+            macd_line, signal_line, hist_series = TechnicalAnalysisService._macd(closes)
+            m = [round(float(v), 4) for v in macd_line.tail(limit)]
+            s = [round(float(v), 4) for v in signal_line.tail(limit)]
+            h = [round(float(v), 4) for v in hist_series.tail(limit)]
+            if not m:
+                return None
+            return {"kind": "macd", "macd_line": m, "signal_line": s, "histogram": h}
+        return None
+    except Exception:
+        return None
+
+
+def _draw_indicator_panel(draw: ImageDraw.ImageDraw, indicator: dict, x0: int, y0: int, w: int, h: int,
+                           colors: dict, lang: Optional[str] = None):
+    """Draws a real RSI or MACD panel below the candlestick chart, fed
+    by _compute_indicator_series() above. Silently does nothing on
+    missing/too-short data (h<=0, <2 points) -- same "no line unless the
+    number is real" discipline _draw_candles()'s support/resistance
+    overlay already follows just above."""
+    if not indicator or h <= 0:
+        return
+    kind = indicator.get("kind")
+    label_font = _get_font(max(10, int(h * 0.16)), lang)
+
+    if kind == "rsi":
+        values = indicator.get("values") or []
+        if len(values) < 2:
+            return
+        draw.text((x0, y0), "RSI (14)", font=label_font, fill=colors["muted"])
+        panel_y0 = y0 + int(h * 0.26)
+        panel_h = h - int(h * 0.26)
+        if panel_h <= 0:
+            return
+        n = len(values)
+        slot_w = w / (n - 1) if n > 1 else w
+
+        def y_for(v):
+            v = max(0.0, min(100.0, v))
+            return panel_y0 + panel_h - (v / 100.0) * panel_h
+
+        for level, color_key in ((70, "red"), (30, "green")):
+            ly = y_for(level)
+            draw.line([(x0, ly), (x0 + w, ly)], fill=colors[color_key], width=1)
+        points = [(x0 + i * slot_w, y_for(v)) for i, v in enumerate(values)]
+        draw.line(points, fill=colors["accent"], width=3)
+
+    elif kind == "macd":
+        macd_line = indicator.get("macd_line") or []
+        signal_line = indicator.get("signal_line") or []
+        hist = indicator.get("histogram") or []
+        if len(macd_line) < 2:
+            return
+        draw.text((x0, y0), "MACD (12,26,9)", font=label_font, fill=colors["muted"])
+        panel_y0 = y0 + int(h * 0.26)
+        panel_h = h - int(h * 0.26)
+        if panel_h <= 0:
+            return
+        n = len(macd_line)
+        all_vals = macd_line + signal_line + hist or [0.0]
+        top, bottom = max(all_vals), min(all_vals)
+        span = (top - bottom) or 1.0
+        slot_w = w / n
+
+        def y_for(v):
+            return panel_y0 + panel_h - ((v - bottom) / span) * panel_h
+
+        if bottom <= 0 <= top:
+            zero_y = y_for(0)
+            draw.line([(x0, zero_y), (x0 + w, zero_y)], fill=colors["muted"], width=1)
+
+        bar_w = max(2, slot_w * 0.5)
+        for i, v in enumerate(hist):
+            cx = x0 + slot_w * i + slot_w / 2
+            color = colors["green"] if v >= 0 else colors["red"]
+            top_y = y_for(max(v, 0))
+            bot_y = y_for(min(v, 0))
+            draw.rectangle([cx - bar_w / 2, top_y, cx + bar_w / 2, max(bot_y, top_y + 2)], fill=color)
+
+        pts_m = [(x0 + i * slot_w + slot_w / 2, y_for(v)) for i, v in enumerate(macd_line)]
+        draw.line(pts_m, fill=colors["accent"], width=2)
+        if len(signal_line) > 1:
+            pts_s = [(x0 + i * slot_w + slot_w / 2, y_for(v)) for i, v in enumerate(signal_line)]
+            draw.line(pts_s, fill=colors["fg"], width=2)
 
 
 def _fetch_candles(ticker: str, limit: int = 20) -> List[dict]:
@@ -1752,15 +1916,26 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
     # throughout: any failure (AI router down, no candle data for a
     # given ticker) just means fewer/zero chart slides and more "custom"
     # text slides -- a chart is always a bonus here, never a requirement.
+    # 2026-09-07 (upgrade #3, "1-4可以全做"): if the topic explicitly names
+    # RSI or MACD, every chart slide below also gets that indicator panel
+    # -- detected once per video (not per ticker) since a topic naming an
+    # indicator is asking about that indicator in general, not a
+    # different one per ticker.
+    requested_indicator = _detect_requested_indicator(parsed["topic"])
+
     n_body = num_slides - 2
-    chart_slides_data = []  # list of (ticker, candles, sr)
+    chart_slides_data = []  # list of (ticker, candles, sr, indicator)
     try:
         candidates = _detect_multiple_tickers(parsed["topic"], max(1, n_body))
         for candidate in candidates:
             candles = _fetch_candles(candidate, limit=20)
             if candles:
                 sr = _fetch_support_resistance(candidate)
-                chart_slides_data.append((candidate, candles, sr))
+                indicator = (
+                    _compute_indicator_series(candidate, requested_indicator, limit=20)
+                    if requested_indicator else None
+                )
+                chart_slides_data.append((candidate, candles, sr, indicator))
             if len(chart_slides_data) >= n_body:
                 break
     except Exception:
@@ -1782,8 +1957,8 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
     bg_payload = {"_bg_image": bg_image} if bg_image is not None else None
 
     body_payloads = [
-        {"ticker": t, "_candles": candles, "_sr": sr}
-        for (t, candles, sr) in chart_slides_data[:n_charts]
+        {"ticker": t, "_candles": candles, "_sr": sr, "_indicator": indicator}
+        for (t, candles, sr, indicator) in chart_slides_data[:n_charts]
     ] + [bg_payload] * (n_body - n_charts)
     slides = [("intro", bg_payload)] + list(zip(body_kinds, body_payloads)) + [("outro", bg_payload)]
 
@@ -1796,5 +1971,7 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
         result["topic"] = parsed["topic"]
         if chart_ticker:
             result["chart_ticker"] = chart_ticker  # back-compat: first chart's ticker
-            result["chart_tickers"] = [t for (t, _, _) in chart_slides_data[:n_charts]]
+            result["chart_tickers"] = [t for (t, _, _, _) in chart_slides_data[:n_charts]]
+        if requested_indicator and n_charts:
+            result["indicator"] = requested_indicator
     return result
