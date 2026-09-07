@@ -490,34 +490,59 @@ def intelligence_usage(token: str, request: Request):
     Per-key `last_used_at` and issuance metadata come from whichever of
     the two key tables issued it; usage counts come from
     intelligence_api_usage keyed by the raw key string, matching how
-    api/intelligence.py's _check_and_spend_quota() already writes to it."""
+    api/intelligence.py's _check_and_spend_quota() already writes to it.
+
+    2026-09-07 (security review: hash keys at rest -- see services/
+    api_key_service.py's verify_key() docstring for the full story):
+    api_keys.key/self_serve_api_keys.key now hold a HASH for every
+    migrated/freshly-issued row, not the raw key -- so this view's join
+    against intelligence_api_usage (still raw-key-keyed; that table is
+    an ephemeral per-day counter, not a persistent credential store, and
+    was deliberately left out of the hashing migration) can no longer
+    match on the key value directly. Fixed by hashing each usage row's
+    raw api_key here instead, so the join happens hash-to-hash --
+    intelligence_api_usage itself is untouched, this endpoint just reads
+    it differently."""
     verify_admin(token, "intelligence_usage", request)
     conn = get_db()
     try:
+        import hashlib
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        # Usage totals per key, computed once and looked up by key below
-        # rather than re-querying per row.
+        # Usage totals per key, computed once and looked up by key_hash
+        # below rather than re-querying per row.
         usage_rows = conn.execute(
             "SELECT api_key, SUM(count) as total, "
             "SUM(CASE WHEN date = ? THEN count ELSE 0 END) as today "
             "FROM intelligence_api_usage GROUP BY api_key",
             (today,),
         ).fetchall()
-        usage_by_key = {
-            r["api_key"]: {"today_calls": r["today"] or 0, "total_calls": r["total"] or 0}
+        usage_by_key_hash = {
+            hashlib.sha256(r["api_key"].encode("utf-8")).hexdigest(): {"today_calls": r["today"] or 0, "total_calls": r["total"] or 0}
             for r in usage_rows
         }
+
+        def _preview_and_hash(key_col: str, key_hash_col, key_preview_col):
+            # key_hash_col/key_preview_col are set for every migrated/
+            # freshly-issued row; the key_col fallback only fires for a
+            # legacy row that's never been verified even once since the
+            # hash migration shipped (key_col still holds real plaintext
+            # then, same as list_keys_for_email()'s equivalent fallback).
+            key_hash = key_hash_col or hashlib.sha256(key_col.encode("utf-8")).hexdigest()
+            preview = key_preview_col or (key_col[:8] + "..." + key_col[-4:])
+            return preview, key_hash
 
         keys = []
         try:
             admin_rows = conn.execute(
-                "SELECT ak.key as key, ak.tier as tier, ak.active as active, "
+                "SELECT ak.key as key, ak.key_hash as key_hash, ak.key_preview as key_preview, "
+                "ak.tier as tier, ak.active as active, "
                 "ak.created_at as created_at, ak.last_used_at as last_used_at, "
                 "u.email as email "
                 "FROM api_keys ak LEFT JOIN users u ON u.id = ak.user_id"
             ).fetchall()
             for r in admin_rows:
+                preview, key_hash = _preview_and_hash(r["key"], r["key_hash"], r["key_preview"])
                 keys.append({
                     "source": "admin_issued",
                     "email": r["email"],
@@ -525,18 +550,19 @@ def intelligence_usage(token: str, request: Request):
                     "active": bool(r["active"]),
                     "created_at": r["created_at"],
                     "last_used_at": r["last_used_at"],
-                    "key_preview": r["key"][:8] + "..." + r["key"][-4:],
-                    **usage_by_key.get(r["key"], {"today_calls": 0, "total_calls": 0}),
+                    "key_preview": preview,
+                    **usage_by_key_hash.get(key_hash, {"today_calls": 0, "total_calls": 0}),
                 })
         except Exception:
             pass  # api_keys table not present yet on a fresh deploy
 
         try:
             self_serve_rows = conn.execute(
-                "SELECT key, email, tier, active, created_at, last_used_at "
+                "SELECT key, key_hash, key_preview, email, tier, active, created_at, last_used_at "
                 "FROM self_serve_api_keys"
             ).fetchall()
             for r in self_serve_rows:
+                preview, key_hash = _preview_and_hash(r["key"], r["key_hash"], r["key_preview"])
                 keys.append({
                     "source": "self_serve",
                     "email": r["email"],
@@ -544,8 +570,8 @@ def intelligence_usage(token: str, request: Request):
                     "active": bool(r["active"]),
                     "created_at": r["created_at"],
                     "last_used_at": r["last_used_at"],
-                    "key_preview": r["key"][:8] + "..." + r["key"][-4:],
-                    **usage_by_key.get(r["key"], {"today_calls": 0, "total_calls": 0}),
+                    "key_preview": preview,
+                    **usage_by_key_hash.get(key_hash, {"today_calls": 0, "total_calls": 0}),
                 })
         except Exception:
             pass  # self_serve_api_keys table not present yet on a fresh deploy

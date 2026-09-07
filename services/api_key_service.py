@@ -24,6 +24,7 @@ XFINLAB consumer account, and keeping it in a separate table means this
 change is purely additive: zero schema changes to the tables the
 admin-issued flow already depends on in production.
 """
+import hashlib
 import sqlite3
 import os
 import secrets
@@ -36,6 +37,35 @@ def _get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _hash_key(raw_key: str) -> str:
+    """2026-09-07 (security review: "API keys stored in plaintext at
+    rest, fix: hash keys, use hmac.compare_digest if ever compared
+    in-process"): SHA-256 hex digest of a raw API key. One-way -- once
+    a row is migrated (see verify_key()'s docstring below), the
+    plaintext bearer secret is no longer recoverable from the database
+    at all, even with full read access to xfinlab.db.
+
+    Plain SHA-256 (not a slow KDF like bcrypt/argon2, which IS the
+    right call for passwords -- see backend/auth/password.py) is the
+    right choice here specifically because these keys are already
+    high-entropy, randomly generated secrets (generate_key() below:
+    secrets.token_urlsafe(32), 256 bits of real randomness), not
+    low-entropy user-chosen passwords. There's no realistic offline
+    dictionary/brute-force attack surface against a value like that for
+    a slow KDF to meaningfully defend against beyond what a fast hash
+    already closes, and a fast hash keeps every single Intelligence API
+    request's auth lookup (this runs on the hot path of every paid API
+    call) cheap."""
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _key_preview(raw_key: str) -> str:
+    """First-8/last-4 preview shown in the dashboard/admin key list --
+    factored out so both the credential tables' migration path and the
+    original issuance path build it identically."""
+    return raw_key[:8] + "..." + raw_key[-4:]
 
 
 def _init_table():
@@ -51,6 +81,23 @@ def _init_table():
             last_used_at TEXT
         )
     """)
+    # 2026-09-07 (security review: hash keys at rest) -- guarded ALTERs,
+    # same idempotent-no-op-if-column-exists convention every other
+    # incremental column addition in this codebase uses (see e.g.
+    # self_serve_api_keys' expires_at below). See verify_key()'s
+    # docstring for the full migration story: `key` still exists and
+    # stays UNIQUE NOT NULL (SQLite can't cheaply relax that without a
+    # full table rebuild), but for every row migrated after this ships,
+    # it holds the SAME value as key_hash -- never the plaintext secret.
+    for ddl in (
+        "ALTER TABLE api_keys ADD COLUMN key_hash TEXT",
+        "ALTER TABLE api_keys ADD COLUMN key_preview TEXT",
+    ):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)")
     conn.commit()
     conn.close()
 
@@ -68,7 +115,16 @@ def issue_key(email: str, tier: str = "free") -> dict:
     """Returns {"error": "..."} on failure, else {"key": "...", "tier": ...,
     "user_id": ...}. The raw key is only ever returned here, at issuance
     time -- show it to the admin/developer immediately, it isn't
-    retrievable later (only a preview is, via list_keys_for_email)."""
+    retrievable later (only a preview is, via list_keys_for_email).
+
+    2026-09-07 (security review: hash keys at rest): the raw key is
+    never written to the database at all for a freshly-issued key --
+    `key_hash`/`key_preview` are computed here and are the only things
+    persisted (plus `key` = the same hash value, purely to satisfy the
+    pre-existing UNIQUE NOT NULL constraint -- see verify_key()'s
+    docstring). The function's own return value / caller contract is
+    completely unchanged: the raw key still comes back here, once,
+    exactly as before."""
     conn = _get_db()
     try:
         user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
@@ -76,9 +132,10 @@ def issue_key(email: str, tier: str = "free") -> dict:
             return {"error": f"No user found with email {email}"}
 
         key = generate_key()
+        key_hash = _hash_key(key)
         conn.execute(
-            "INSERT INTO api_keys (user_id, key, tier, active) VALUES (?, ?, ?, 1)",
-            (user["id"], key, tier),
+            "INSERT INTO api_keys (user_id, key, key_hash, key_preview, tier, active) VALUES (?, ?, ?, ?, ?, 1)",
+            (user["id"], key_hash, key_hash, _key_preview(key), tier),
         )
         conn.commit()
         return {"key": key, "tier": tier, "user_id": user["id"]}
@@ -89,15 +146,42 @@ def issue_key(email: str, tier: str = "free") -> dict:
 def verify_key(key: str) -> dict:
     """Returns {"valid": False} if missing/inactive/unknown, else
     {"valid": True, "user_id":..., "tier":...}. Never raises -- callers
-    (api/intelligence.py) turn a False result into a 401 themselves."""
+    (api/intelligence.py) turn a False result into a 401 themselves.
+
+    2026-09-07 (security review: hash keys at rest, zero customer
+    impact): looks up by key_hash first -- this covers every key issued
+    after this migration shipped (issue_key()/issue_self_serve_*_key()
+    now write key_hash immediately) AND every legacy key that's already
+    been auto-migrated by a prior call to this same function. A row
+    with key_hash IS NULL is a legacy key issued before this shipped --
+    its `key` column still holds the real plaintext, checked here as a
+    one-time fallback. On a legacy match, this call auto-migrates that
+    row on the spot: fills in key_hash/key_preview and overwrites `key`
+    with the hash, so the plaintext is gone from the database and this
+    fallback path is never needed for that row again. Net effect: every
+    key that gets used at least once after this ships is transparently
+    migrated -- no re-issuance, no downtime, no "please get a new key"
+    email to any of the live paying customers on this table."""
     if not key:
         return {"valid": False}
 
     conn = _get_db()
     try:
+        key_hash = _hash_key(key)
         row = conn.execute(
-            "SELECT * FROM api_keys WHERE key=? AND active=1", (key,)
+            "SELECT * FROM api_keys WHERE key_hash=? AND active=1", (key_hash,)
         ).fetchone()
+        if not row:
+            legacy = conn.execute(
+                "SELECT * FROM api_keys WHERE key=? AND key_hash IS NULL AND active=1", (key,)
+            ).fetchone()
+            if legacy:
+                conn.execute(
+                    "UPDATE api_keys SET key_hash=?, key_preview=?, key=? WHERE id=?",
+                    (key_hash, _key_preview(key), key_hash, legacy["id"]),
+                )
+                conn.commit()
+                row = legacy
         if row:
             conn.execute(
                 "UPDATE api_keys SET last_used_at=? WHERE id=?",
@@ -111,9 +195,23 @@ def verify_key(key: str) -> dict:
         # rather than merging tables, so this stays the single
         # verification entrypoint api/intelligence.py calls regardless of
         # which flow issued the key.
+        #
+        # 2026-09-07: same hash-first/legacy-plaintext-fallback/auto-
+        # migrate pattern as api_keys above.
         row2 = conn.execute(
-            "SELECT * FROM self_serve_api_keys WHERE key=? AND active=1", (key,)
+            "SELECT * FROM self_serve_api_keys WHERE key_hash=? AND active=1", (key_hash,)
         ).fetchone()
+        if not row2:
+            legacy2 = conn.execute(
+                "SELECT * FROM self_serve_api_keys WHERE key=? AND key_hash IS NULL AND active=1", (key,)
+            ).fetchone()
+            if legacy2:
+                conn.execute(
+                    "UPDATE self_serve_api_keys SET key_hash=?, key_preview=?, key=? WHERE id=?",
+                    (key_hash, _key_preview(key), key_hash, legacy2["id"]),
+                )
+                conn.commit()
+                row2 = legacy2
         if row2:
             # 2026-08-24 (self-serve Pro API billing): paid self-serve keys
             # carry an expires_at (subscription period end, refreshed by
@@ -148,13 +246,24 @@ def get_email_for_key(key: str) -> "str | None":
     Checks self_serve_api_keys first (email is stored directly there),
     then falls back to api_keys -> users (admin-issued keys only carry a
     user_id, so this needs the join). Never raises; a lookup failure just
-    means no nudge gets sent, not a broken request."""
+    means no nudge gets sent, not a broken request.
+
+    2026-09-07 (security review: hash keys at rest): looks up by
+    key_hash first (matches every migrated/freshly-issued row -- in
+    practice this is always the branch that fires, since both real
+    callers of this function run it right after verify_key() already
+    ran for the same key in the same request, which auto-migrates a row
+    on first use). Falls back to the plaintext `key` column purely for
+    a not-yet-migrated legacy row, same as verify_key() -- read-only
+    here (no migration side effect); verify_key() already owns that."""
     if not key:
         return None
     conn = _get_db()
     try:
+        key_hash = _hash_key(key)
         row = conn.execute(
-            "SELECT email FROM self_serve_api_keys WHERE key=? AND active=1", (key,)
+            "SELECT email FROM self_serve_api_keys WHERE (key_hash=? OR key=?) AND active=1",
+            (key_hash, key),
         ).fetchone()
         if row:
             return row["email"]
@@ -163,9 +272,9 @@ def get_email_for_key(key: str) -> "str | None":
             """
             SELECT u.email AS email
             FROM api_keys k JOIN users u ON u.id = k.user_id
-            WHERE k.key=? AND k.active=1
+            WHERE (k.key_hash=? OR k.key=?) AND k.active=1
             """,
-            (key,),
+            (key_hash, key),
         ).fetchone()
         if row2:
             return row2["email"]
@@ -191,7 +300,12 @@ def list_keys_for_email(email: str) -> list:
                 "active": bool(r["active"]),
                 "created_at": r["created_at"],
                 "last_used_at": r["last_used_at"],
-                "key_preview": r["key"][:8] + "..." + r["key"][-4:],
+                # 2026-09-07: key_preview column is set for every
+                # migrated/freshly-issued row; the raw `key` fallback
+                # below only ever fires for a legacy row that's never
+                # been verified even once since the hash migration
+                # shipped (key column still holds real plaintext then).
+                "key_preview": r["key_preview"] or (r["key"][:8] + "..." + r["key"][-4:]),
             }
             for r in rows
         ]
@@ -220,21 +334,40 @@ def revoke_key(key_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 # 2026-08-25 (AJ: "referral雙方加quota"): resolves a user_id straight to
-# their raw active key -- referral_service.py's use_code() only has
-# user_id for both the referrer and the new user (not their email), and
-# needs the raw key string to call intelligence_quota_service.
-# add_quota_bonus(). Returns the most-recently-issued active key, or None
-# if this user has no key yet (a pre-existing user who registered before
-# the auto-issuance batch shipped) -- callers treat None as "nothing to
-# bonus, skip silently", never an error.
+# their active key -- referral_service.py's use_code() only has user_id
+# for both the referrer and the new user (not their email), and needs a
+# stable per-key identifier to call intelligence_quota_service.
+# add_quota_bonus(). Returns the most-recently-issued active key's
+# identifier, or None if this user has no key yet (a pre-existing user
+# who registered before the auto-issuance batch shipped) -- callers
+# treat None as "nothing to bonus, skip silently", never an error.
+#
+# 2026-09-07 (security review: hash keys at rest): returns key_hash, not
+# the raw key -- after the credential-table migration above, the raw
+# key isn't reliably retrievable here any more (a row that's been
+# verified even once no longer holds it). intelligence_quota_service's
+# add_quota_bonus()/get_quota_bonus() were updated in the same change to
+# be keyed by this same hash value throughout (see that module's own
+# 2026-09-07 note), so this return value's new meaning is consistent
+# everywhere it flows. For a legacy row that hasn't been auto-migrated
+# yet (key_hash still NULL), computes the hash on the fly from the
+# still-present plaintext `key` column -- read-only, doesn't persist it
+# (verify_key() owns that side effect) -- so this always returns the
+# same stable hash regardless of a given row's migration state.
 def get_active_key_for_user(user_id: int) -> "str | None":
     conn = _get_db()
     try:
+        # id DESC as a tiebreaker: created_at has only second resolution,
+        # so two keys issued within the same second would otherwise tie
+        # and SQLite's tie-break order isn't guaranteed -- id is
+        # autoincrement and always reflects true insertion order.
         row = conn.execute(
-            "SELECT key FROM api_keys WHERE user_id=? AND active=1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT key, key_hash FROM api_keys WHERE user_id=? AND active=1 ORDER BY created_at DESC, id DESC LIMIT 1",
             (user_id,),
         ).fetchone()
-        return row["key"] if row else None
+        if not row:
+            return None
+        return row["key_hash"] or _hash_key(row["key"])
     finally:
         conn.close()
 
@@ -252,19 +385,20 @@ def get_my_key_status(email: str) -> dict:
     # bonus (services/intelligence_quota_service.add_quota_bonus) so the
     # dashboard panel can show "+50 from referrals" rather than a user
     # wondering why their limit is higher than the advertised 300. Looks
-    # the raw key up separately (list_keys_for_email intentionally never
-    # returns it) purely to read the bonus table -- still never included
-    # in this function's own return value.
+    # the key identifier up separately (list_keys_for_email intentionally
+    # never returns anything key-derived beyond the masked preview)
+    # purely to read the bonus table -- never included in this
+    # function's own return value.
     quota_bonus = 0
     try:
         conn = _get_db()
         user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
         conn.close()
         if user:
-            raw_key = get_active_key_for_user(user["id"])
-            if raw_key:
+            key_ref = get_active_key_for_user(user["id"])  # key_hash -- see that function's 2026-09-07 note
+            if key_ref:
                 from services.intelligence_quota_service import get_quota_bonus
-                quota_bonus = get_quota_bonus(raw_key)
+                quota_bonus = get_quota_bonus(key_ref)
     except Exception:
         quota_bonus = 0
     return {
@@ -326,10 +460,20 @@ def _init_self_serve_tables():
     # see issue_self_serve_paid_key() below. Guarded ALTER so this is a
     # no-op on a DB that already has the column, same convention as every
     # other incremental-column addition in this codebase.
-    try:
-        conn.execute("ALTER TABLE self_serve_api_keys ADD COLUMN expires_at TEXT")
-    except Exception:
-        pass
+    #
+    # 2026-09-07 (security review: hash keys at rest) -- same key_hash/
+    # key_preview addition + unique index as api_keys above. See
+    # verify_key()'s docstring for the full migration story.
+    for ddl in (
+        "ALTER TABLE self_serve_api_keys ADD COLUMN expires_at TEXT",
+        "ALTER TABLE self_serve_api_keys ADD COLUMN key_hash TEXT",
+        "ALTER TABLE self_serve_api_keys ADD COLUMN key_preview TEXT",
+    ):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_self_serve_api_keys_key_hash ON self_serve_api_keys(key_hash)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS self_serve_signup_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,9 +573,10 @@ def issue_self_serve_free_key(email: str) -> dict:
             (email,),
         )
         key = generate_key()
+        key_hash = _hash_key(key)  # 2026-09-07: raw key never stored -- see issue_key()'s note
         conn.execute(
-            "INSERT INTO self_serve_api_keys (email, key, tier, active) VALUES (?, ?, 'free', 1)",
-            (email, key),
+            "INSERT INTO self_serve_api_keys (email, key, key_hash, key_preview, tier, active) VALUES (?, ?, ?, ?, 'free', 1)",
+            (email, key_hash, key_hash, _key_preview(key)),
         )
         conn.commit()
         return {"key": key, "tier": "free", "email": email}
@@ -466,11 +611,12 @@ def issue_self_serve_paid_key(email: str, tier: str, days: int) -> dict:
             (email,),
         )
         key = generate_key()
+        key_hash = _hash_key(key)  # 2026-09-07: raw key never stored -- see issue_key()'s note
         from datetime import timedelta
         expires_at = (datetime.utcnow() + timedelta(days=days)).replace(microsecond=0).isoformat()
         conn.execute(
-            "INSERT INTO self_serve_api_keys (email, key, tier, active, expires_at) VALUES (?, ?, ?, 1, ?)",
-            (email, key, tier, expires_at),
+            "INSERT INTO self_serve_api_keys (email, key, key_hash, key_preview, tier, active, expires_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (email, key_hash, key_hash, _key_preview(key), tier, expires_at),
         )
         conn.commit()
         return {"key": key, "tier": tier, "email": email, "expires_at": expires_at}
