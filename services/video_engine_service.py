@@ -1595,6 +1595,105 @@ def _detect_commodity_forex_ticker(topic: str) -> Optional[str]:
     return None
 
 
+def _detect_all_commodity_forex_tickers(topic: str, max_count: int) -> List[str]:
+    """2026-09-07 addition for multi-chart-slide support (AJ: "1-4可以全做"
+    -- upgrade #2, multiple chart slides per video, e.g. "compare gold and
+    oil" or "黃金同白銀邊隻強啲"). Unlike _detect_commodity_forex_ticker()
+    above (which stops at the first/longest match, correct for the
+    single-chart case), this scans for EVERY distinct commodity/forex
+    keyword present so a topic naming several can get a chart slide each.
+    Order-preserving by first appearance in the topic text; deduplicates
+    by resulting ticker (e.g. "gold" and "金價" both map to GLD -- only
+    counted once). Capped at max_count since a video only has so many
+    body slides. Never raises; returns [] on no match, same
+    best-effort contract as the rest of this ticker-detection code."""
+    lower = (topic or "").lower()
+    hits = []  # list of (first_index, ticker)
+    for keyword, ticker in _COMMODITY_FOREX_KEYWORDS.items():
+        idx = lower.find(keyword)
+        if idx != -1:
+            hits.append((idx, ticker))
+    hits.sort(key=lambda pair: pair[0])
+    result = []
+    for _, ticker in hits:
+        if ticker not in result:
+            result.append(ticker)
+        if len(result) >= max_count:
+            break
+    return result
+
+
+def _ai_extract_extra_tickers(topic: str, exclude: List[str], max_count: int) -> List[str]:
+    """AI-assisted extraction of stock/crypto tickers for multi-chart
+    videos (e.g. "compare NVDA and AMD earnings", "邊隻股票強：TSLA定
+    BYD"). Complements _detect_all_commodity_forex_tickers() above, which
+    only knows a fixed commodity/forex keyword list -- equities and
+    crypto need the same AI-assisted, conversational-text-tolerant
+    matching intent_router_service.classify_ai() already uses for the
+    single-ticker case, just extended to return more than one.
+
+    Best-effort like every other ticker-detection helper in this file:
+    on ANY failure (AI router down, bad/unparseable JSON) this returns
+    [] rather than raising -- the caller already treats a chart as a
+    bonus over plain text slides, never a requirement, and this must
+    not change that."""
+    if max_count <= 0:
+        return []
+    try:
+        import json
+        import re as _re
+        from ai.ai_router import get_ai_response
+
+        exclude_note = f" (not: {', '.join(exclude)})" if exclude else ""
+        prompt = (
+            f"List up to {max_count} distinct stock or crypto ticker symbols that are "
+            f"explicitly named or clearly and specifically implied in this video topic"
+            f"{exclude_note}. Only include a ticker if the topic is really about that "
+            f"specific company/asset -- do not guess or pad the list.\n\n"
+            f'Topic: "{topic}"\n\n'
+            'Respond with ONLY a JSON array of ticker strings, no other text, e.g. '
+            '["NVDA", "AMD"] or [] if none.'
+        )
+        raw = get_ai_response(prompt, max_tokens=100)
+        match = _re.search(r"\[.*\]", raw or "", _re.S)
+        if not match:
+            return []
+        parsed = json.loads(match.group(0))
+        if not isinstance(parsed, list):
+            return []
+        seen = set(t.upper() for t in exclude)
+        result = []
+        for t in parsed:
+            if not isinstance(t, str):
+                continue
+            t = t.strip().upper()
+            if t and t not in seen and _re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", t):
+                seen.add(t)
+                result.append(t)
+            if len(result) >= max_count:
+                break
+        return result
+    except Exception:
+        return []
+
+
+def _detect_multiple_tickers(topic: str, max_count: int) -> List[str]:
+    """Combines the deterministic commodity/forex keyword scan with the
+    AI-assisted equity/crypto extractor to support multi-chart-slide
+    videos. Commodity/forex hits come first (cheap, deterministic, zero
+    extra API call), then the AI extractor fills any remaining slots
+    with equity/crypto tickers, excluding what was already found so the
+    two don't duplicate. Returns [] (never raises) if nothing is
+    confidently detected -- caller falls back to plain "custom" text
+    slides exactly as before this feature existed."""
+    if max_count <= 0:
+        return []
+    tickers = _detect_all_commodity_forex_tickers(topic, max_count)
+    if len(tickers) < max_count:
+        tickers += _ai_extract_extra_tickers(topic, exclude=tickers, max_count=max_count - len(tickers))
+    return tickers[:max_count]
+
+
 def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: str = None) -> dict:
     """2026-08-09 (admin chat-to-video feature, requested as "Video Engine
     可以加個CHAT更彈性做任何影片嗎"): admin-only, free-text-driven video
@@ -1639,37 +1738,37 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
         _log_generation("error", f"AI script-writer failed for custom topic: {parsed['topic'][:80]!r}")
         return {"available": False, "message": "AI could not write a script for this request -- try rephrasing it."}
 
-    # 2026-08-09: if the admin's topic names a real ticker (e.g. "make a
-    # video about NVDA earnings"), ground the first body slide in an actual
-    # candlestick chart instead of plain text -- same real-OHLC renderer
-    # ("chart" kind added to _render_slide) that the daily-signals video
-    # already uses. Detection reuses intent_router_service's AI-assisted
-    # classifier (handles conversational/non-English topic text, e.g.
-    # "講吓比特幣", not just literal "NVDA" tokens) rather than duplicating
-    # ticker-parsing logic here. Best-effort: any failure here (AI router
-    # down, no candle data returned) just means plain "custom" text slides,
-    # never blocks the video -- a chart is a bonus, not a requirement.
-    chart_ticker = None
-    chart_candles = []
-    chart_sr = None
+    # 2026-08-09, extended 2026-09-07 for multiple chart slides (AJ's
+    # upgrade #2, "1-4可以全做"): if the admin's topic names one or more
+    # real tickers (e.g. "compare NVDA and AMD", "gold vs oil this week"),
+    # ground that many body slides in actual candlestick charts instead
+    # of plain text -- same real-OHLC renderer ("chart" kind in
+    # _render_slide) the daily-signals video already uses, now just
+    # looped over however many distinct tickers were found (capped by
+    # how many body slots the video actually has). Detection tries the
+    # deterministic commodity/forex keyword list first (cheap, no AI
+    # call), then falls back to an AI-assisted extractor for equities/
+    # crypto and conversational phrasing (e.g. "講吓比特幣"). Best-effort
+    # throughout: any failure (AI router down, no candle data for a
+    # given ticker) just means fewer/zero chart slides and more "custom"
+    # text slides -- a chart is always a bonus here, never a requirement.
+    n_body = num_slides - 2
+    chart_slides_data = []  # list of (ticker, candles, sr)
     try:
-        candidate = _detect_commodity_forex_ticker(parsed["topic"])
-        if not candidate:
-            from services.intent_router_service import classify_ai
-            classification = classify_ai(parsed["topic"])
-            candidate = (classification or {}).get("ticker")
-        if candidate:
-            candidate = str(candidate).strip().upper()
+        candidates = _detect_multiple_tickers(parsed["topic"], max(1, n_body))
+        for candidate in candidates:
             candles = _fetch_candles(candidate, limit=20)
             if candles:
-                chart_ticker, chart_candles = candidate, candles
-                chart_sr = _fetch_support_resistance(candidate)
+                sr = _fetch_support_resistance(candidate)
+                chart_slides_data.append((candidate, candles, sr))
+            if len(chart_slides_data) >= n_body:
+                break
     except Exception:
-        chart_ticker, chart_candles, chart_sr = None, [], None
+        chart_slides_data = []
 
-    body_kinds = ["custom"] * (num_slides - 2)
-    if chart_ticker and body_kinds:
-        body_kinds[0] = "chart"
+    n_charts = min(len(chart_slides_data), n_body)
+    chart_ticker = chart_slides_data[0][0] if chart_slides_data else None  # back-compat: first chart's ticker
+    body_kinds = ["chart"] * n_charts + ["custom"] * (n_body - n_charts)
 
     # 2026-09-06 (AJ asked "GEN出來可以有相關圖片做背景嗎" -- can the
     # generated video have a relevant background image): ONE AI-generated
@@ -1683,9 +1782,9 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
     bg_payload = {"_bg_image": bg_image} if bg_image is not None else None
 
     body_payloads = [
-        {"ticker": chart_ticker, "_candles": chart_candles, "_sr": chart_sr} if k == "chart" else bg_payload
-        for k in body_kinds
-    ]
+        {"ticker": t, "_candles": candles, "_sr": sr}
+        for (t, candles, sr) in chart_slides_data[:n_charts]
+    ] + [bg_payload] * (n_body - n_charts)
     slides = [("intro", bg_payload)] + list(zip(body_kinds, body_payloads)) + [("outro", bg_payload)]
 
     result = _render_video_pipeline(
@@ -1696,5 +1795,6 @@ def generate_custom_video(prompt_text: str, num_slides: int = 4, lang_override: 
         result["theme"] = theme
         result["topic"] = parsed["topic"]
         if chart_ticker:
-            result["chart_ticker"] = chart_ticker
+            result["chart_ticker"] = chart_ticker  # back-compat: first chart's ticker
+            result["chart_tickers"] = [t for (t, _, _) in chart_slides_data[:n_charts]]
     return result

@@ -1949,7 +1949,8 @@ async function generateCustomVideo() {
       result.innerHTML = `<span style="color:var(--red)">⚠️ ${escapeHtml(data.message || 'Video Engine unavailable')}</span>`;
     } else {
       const tgNote = postTelegram ? (data.telegram_posted ? ' · posted to Telegram ✅' : ' · Telegram post failed/skipped') : '';
-      const chartNote = data.chart_ticker ? ` · chart: ${escapeHtml(data.chart_ticker)}` : '';
+      const chartTickers = (data.chart_tickers && data.chart_tickers.length) ? data.chart_tickers : (data.chart_ticker ? [data.chart_ticker] : []);
+      const chartNote = chartTickers.length ? ` · chart${chartTickers.length > 1 ? 's' : ''}: ${escapeHtml(chartTickers.join(', '))}` : '';
       result.innerHTML = `<span style="color:var(--green)">✅ Generated: ${data.duration_sec}s, ${data.slides_count} slides · ${escapeHtml(data.lang || '')} · ${escapeHtml(data.aspect_ratio || '')}${chartNote}${tgNote}</span>${_youtubeResultNote(data)}`;
     }
     loadVideoStatus();
