@@ -69,8 +69,11 @@ off stale data instead of erroring).
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional
+
+import requests
 
 from services.outbound_http import get_with_backoff
 from services.data_source_registry import (
@@ -175,7 +178,17 @@ def _fetch_series(series_id: str, n_obs: int = 13) -> Optional[list]:
     Fallback order when a fresh HTTP fetch doesn't happen or doesn't
     return data: in-memory cache (fast, same-process, lost on restart)
     -> fred_macro_observations table (survives restart, may be stale)
-    -> None."""
+    -> None.
+
+    2026-09-08 fix (AJ noticed a ~13% error rate on this source in the
+    Data Factory panel, e.g. "RRPONTSYD: ...Read timed out"): FRED's own
+    API occasionally takes longer than 10s to respond, and
+    get_with_backoff()'s retry only covers HTTP 429/503 -- a connection/
+    read timeout is a raised exception, not a status code, so it never
+    got retried before. Timeout raised 10s -> 20s, plus one short local
+    retry (2s pause) scoped to just this function, rather than changing
+    outbound_http.py's shared retry behavior for every other caller of
+    get_with_backoff() across the codebase."""
     now = datetime.now(timezone.utc).timestamp()
     cached = _cache.get(series_id)
     if cached and (now - cached["fetched_at"]) < _CACHE_TTL_SECONDS:
@@ -194,17 +207,29 @@ def _fetch_series(series_id: str, n_obs: int = 13) -> Optional[list]:
         "limit": n_obs,
     }
     record_run_start(SOURCE_KEY)
-    try:
-        res = get_with_backoff(FRED_BASE_URL, params=params, timeout=10)
+    payload = None
+    for attempt in range(2):
+        try:
+            res = get_with_backoff(FRED_BASE_URL, params=params, timeout=20)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt == 0:
+                logger.info("fred_macro_service: %s timed out, retrying once: %s", series_id, e)
+                time.sleep(2)
+                continue
+            logger.info("fred_macro_service: failed to fetch %s: %s", series_id, e)
+            record_run_error(SOURCE_KEY, f"{series_id}: {e}")
+            return (cached["observations"] if cached else None) or _load_persisted(series_id, n_obs)
+        except Exception as e:
+            logger.info("fred_macro_service: failed to fetch %s: %s", series_id, e)
+            record_run_error(SOURCE_KEY, f"{series_id}: {e}")
+            return (cached["observations"] if cached else None) or _load_persisted(series_id, n_obs)
+
         if res.status_code != 200:
             logger.info("fred_macro_service: %s returned HTTP %s", series_id, res.status_code)
             record_run_error(SOURCE_KEY, f"{series_id}: HTTP {res.status_code}")
             return (cached["observations"] if cached else None) or _load_persisted(series_id, n_obs)
         payload = res.json()
-    except Exception as e:
-        logger.info("fred_macro_service: failed to fetch %s: %s", series_id, e)
-        record_run_error(SOURCE_KEY, f"{series_id}: {e}")
-        return (cached["observations"] if cached else None) or _load_persisted(series_id, n_obs)
+        break
 
     rows = payload.get("observations") or []
     observations = []
