@@ -18,7 +18,7 @@ python-telegram-bot==22.8
 pywebpush==2.3.0
 scikit-learn==1.7.2
 joblib==1.5.3
-Pillow==12.2.0
+Pillow==12.3.0
 dnspython==2.8.0
 QuantLib==1.43
 sympy==1.14.0
