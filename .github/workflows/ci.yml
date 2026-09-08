@@ -36,7 +36,7 @@ jobs:
     env:
       NEWS_API_KEY: ci-smoke-test-placeholder-not-a-real-key
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
@@ -76,7 +76,7 @@ jobs:
     env:
       NEWS_API_KEY: ci-smoke-test-placeholder-not-a-real-key
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
