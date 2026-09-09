@@ -16,7 +16,7 @@ reportlab==4.5.1
 apscheduler==3.11.3
 python-telegram-bot==22.8
 pywebpush==2.3.0
-scikit-learn==1.7.2
+scikit-learn==1.9.0
 joblib==1.5.3
 Pillow==12.3.0
 dnspython==2.8.0
