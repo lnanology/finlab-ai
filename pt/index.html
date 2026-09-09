@@ -530,16 +530,6 @@
 </div>
 <button class="search-btn" onclick="goAnalyze()"><span data-i18n="hero_btn">Analisar →</span></button>
 </div>
-<!-- 2026-07-25 ("要好似分析按鈕咁比人打字輸入"): upgraded from a plain
-         link to an input+button row matching .search-bar's own shape --
-         type a free-text question here instead of a ticker, hits Enter
-         or the button, lands in chat.html with the question auto-sent
-         via its existing ?q= handler (same mechanism as goAnalyze() above
-         handing off to ai-analysis.html?symbols=...). -->
-<div class="ask-ai-bar">
-<input class="ask-ai-input" data-i18n-placeholder="hero_ask_ai_placeholder" id="heroAskAi" onkeydown="if(event.key==='Enter') goAskAi()" placeholder="Pergunte à IA, ex.: qual ação está melhor agora?"/>
-<button class="ask-ai-btn" onclick="goAskAi()"><span data-i18n="hero_ask_ai">Pergunte diretamente à IA</span></button>
-</div>
 </div>
 <div class="hero-right">
 <div class="ai-result-card" id="heroResultCard">
