@@ -16,14 +16,33 @@ WORKDIR /app
 # C++ library with Python bindings) doesn't ship a prebuilt wheel for
 # whatever platform Glama builds on -- without it, that one line in
 # requirements.txt could fail to install and take the whole build down.
+#
+# curl is needed for the litestream install step below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# 2026-09-09 fix (real Railway outage): railway.json's own "deploy.startCommand"
+# always runs `/app/bin/litestream ...` to wrap uvicorn (continuous SQLite
+# replication), regardless of which builder actually produced the image.
+# Adding this Dockerfile in PR #51 caused a real production deploy failure --
+# "The executable /app/bin/litestream could not be found" -- because Railway
+# built from THIS file instead of nixpacks.toml (which is where litestream
+# was previously installed, in its own [phases.litestream] block) even
+# though railway.json pins "builder": "NIXPACKS". Installing the identical
+# binary here (same version/URL as nixpacks.toml) makes this Dockerfile
+# correct no matter which builder Railway or any other platform picks.
+RUN mkdir -p /app/bin \
+    && curl -L https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz -o /tmp/litestream.tar.gz \
+    && tar -xzf /tmp/litestream.tar.gz -C /app/bin \
+    && chmod +x /app/bin/litestream \
+    && rm -f /tmp/litestream.tar.gz
 
 # Same placeholder pattern already proven in .github/workflows/ci.yml:
 # services/news_service.py's NewsService.__init__ only checks that
